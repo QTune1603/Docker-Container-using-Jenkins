@@ -1,120 +1,237 @@
-# Project 05: Deploy Code on Docker Container using Jenkins
+# Project 05: Deploy Java Web Application on Docker Container using Jenkins Pipeline
 
-Dự án này hướng dẫn tự động hóa quy trình Build, Đóng gói (Containerize) và Triển khai (Deploy) ứng dụng Java Web vào Docker container thông qua Jenkins Pipeline trên AWS.
+Dự án này là tài liệu thực hành hướng dẫn xây dựng một quy trình **CI/CD hoàn chỉnh và tự động** (Continuous Integration/Continuous Deployment) từ đầu. Quy trình này sẽ tự động lấy code từ GitHub, biên dịch ra gói ứng dụng (`.war`), đóng gói ứng dụng đó thành một ảnh Docker (Docker Image) chứa Apache Tomcat 9, và triển khai chạy (Deploy) lên Docker Container trên máy chủ AWS EC2.
 
 ---
 
-## 🏗️ Cấu trúc Thư mục Dự án
+## 📐 Sơ đồ Kiến trúc & Luồng Hoạt động (CI/CD Workflow)
 
 ```text
-Docker-Container-using-Jenkins/
-├── Dockerfile          # Cấu hình build ảnh Docker chạy Tomcat 9
-├── Jenkinsfile         # Jenkins Pipeline (Build -> Docker Build -> Deploy)
-├── pom.xml             # Quản lý thư viện và cấu hình build Maven
-├── README.md           # Hướng dẫn chi tiết này
-└── src/
-    └── main/
-        └── webapp/
-            ├── index.jsp        # Giao diện chính của ứng dụng
-            └── WEB-INF/
-                └── web.xml      # Cấu hình servlet của ứng dụng
++------------------+           +--------------------+           +------------------------+
+|   Developer      |           |     GitHub         |           |     AWS EC2 Server     |
+|  (Local Machine) | --push--> | (Public Repository)| --clone-> |    (Jenkins Server)    |
++------------------+           +--------------------+           +------------------------+
+                                                                            |
+                                                                   (Jenkins Pipeline)
+                                                                            |
+                                                                            v
+                                                                   +-----------------+
+                                                                   |  Stage 1: Clone |
+                                                                   +-----------------+
+                                                                            |
+                                                                            v
+                                                                   +-----------------+
+                                                                   |  Stage 2: Build | ---> Maven compile (app.war)
+                                                                   +-----------------+
+                                                                            |
+                                                                            v
+                                                                   +-----------------+
+                                                                   |  Stage 3: Docker| ---> Build Docker Image
+                                                                   +-----------------+
+                                                                            |
+                                                                            v
+                                                                   +-----------------+
+                                                                   |  Stage 4: Deploy| ---> Run Docker Container
+                                                                   +-----------------+      (Expose Port 8087)
 ```
 
 ---
 
-## 🛠️ Hướng dẫn Từng Bước Thực Hành Lab
-
-Có 2 cách triển khai môi trường Lab này:
-*   **Cách 1 (Khuyên dùng - Đơn giản & Hiện đại)**: Cài cả Jenkins và Docker trên **cùng 1 máy chủ EC2 Instance**. Jenkins chạy lệnh docker cục bộ để build và deploy.
-*   **Cách 2 (Theo tài liệu gốc)**: Cài Jenkins trên EC2 Instance A, Docker Host trên EC2 Instance B. Kết nối hai máy qua SSH và plugin `Publish Over SSH`.
-
-Dưới đây là hướng dẫn chi tiết cho **Cách 1** (sử dụng Jenkinsfile Declarative Pipeline hiện đại).
-
-### Bước 1: Khởi tạo Máy chủ EC2 và Cài đặt Jenkins
-1. Khởi tạo một instance EC2 Linux (khuyên dùng Amazon Linux 2 hoặc Ubuntu), loại instance `t2.micro` hoặc `t2.medium` (nếu muốn build nhanh hơn).
-2. Mở cổng **8080** (cho Jenkins) và **8087** (cho Ứng dụng mẫu sau khi Docker deploy) trong Security Group.
-3. Cài đặt Java 11 và Jenkins:
-   ```bash
-   # Cài đặt Java 11
-   sudo yum install java-11-amazon-corretto -y
-
-   # Thêm repo Jenkins và cài đặt
-   sudo wget -O /etc/yum.repos.d/jenkins.repo https://pkg.jenkins.io/redhat-stable/jenkins.repo
-   sudo rpm --import https://pkg.jenkins.io/redhat-stable/jenkins.io-2023.key
-   sudo yum install jenkins -y
-
-   # Start Jenkins
-   sudo systemctl enable jenkins
-   sudo systemctl start jenkins
-   ```
-4. Truy cập giao diện Web Jenkins tại địa chỉ `http://<EC2_PUBLIC_IP>:8080`.
-5. Lấy mật khẩu admin khởi tạo bằng lệnh:
-   ```bash
-   sudo cat /var/lib/jenkins/secrets/initialAdminPassword
-   ```
-6. Cài đặt các plugin mặc định được gợi ý (Install suggested plugins).
-
-### Bước 2: Cài đặt Docker và Cấp quyền cho Jenkins
-1. Cài đặt Docker trên chính máy chủ EC2 đó:
-   ```bash
-   sudo yum update -y
-   sudo yum install docker -y
-   sudo systemctl enable docker
-   sudo systemctl start docker
-   ```
-2. **Quan trọng**: Cấp quyền chạy Docker cho user `jenkins` để Jenkins có thể gọi lệnh `docker build` và `docker run` mà không cần quyền root/sudo:
-   ```bash
-   sudo usermod -aG docker jenkins
-   # Restart lại Jenkins để cập nhật quyền group mới
-   sudo systemctl restart jenkins
-   ```
-
-### Bước 3: Cấu hình Maven trên Jenkins Server
-1. Cài đặt Maven vào thư mục `/opt`:
-   ```bash
-   cd /opt
-   sudo wget https://archive.apache.org/dist/maven/maven-3/3.8.8/binaries/apache-maven-3.8.8-bin.tar.gz
-   sudo tar -xvzf apache-maven-3.8.8-bin.tar.gz
-   ```
-2. Cấu hình biến môi trường Maven trong `/etc/profile` hoặc cấu hình trực tiếp qua giao diện Jenkins:
-   * Vào **Manage Jenkins** -> **Global Tool Configuration** (hoặc **Tools** ở phiên bản mới).
-   * Tại mục **Maven installations**: Click **Add Maven**.
-     * Đặt tên là: `Maven 3` (hoặc tên bất kỳ bạn muốn).
-     * Bỏ chọn *Install automatically*.
-     * Nhập **MAVEN_HOME**: `/opt/apache-maven-3.8.8`.
-   * Nhấn **Save**.
-
-### Bước 4: Tạo Job Pipeline trên Jenkins
-1. Tại màn hình chính Jenkins, chọn **New Item**.
-2. Đặt tên Job (ví dụ: `Project-05-Docker-Deployment`), chọn kiểu **Pipeline** và click **OK**.
-3. Tại phần cấu hình Job:
-   * Cuộn xuống phần **Pipeline**.
-   * Tại mục *Definition*, chọn **Pipeline script from SCM**.
-   * Tại mục *SCM*, chọn **Git**.
-   * Nhập **Repository URL**: Đường dẫn repo GitHub của bạn (ví dụ: `https://github.com/<tên-user>/Docker-Container-using-Jenkins.git`).
-   * Chọn **Branch Specifier** là: `*/main` (hoặc branch chính của bạn).
-   * Tại mục *Script Path*, giữ nguyên là `Jenkinsfile`.
-4. Nhấp **Save**.
-
-### Bước 5: Chạy Pipeline & Kiểm tra Kết quả
-1. Click **Build Now** trên Jenkins để kích hoạt Pipeline.
-2. Theo dõi các Stage chạy qua giao diện Pipeline:
-   * **Stage 1 (Clone)**: Jenkins kéo code từ repo GitHub của bạn về workspace.
-   * **Stage 2 (Build)**: Jenkins chạy `mvn clean package` để build ra file `target/hello-world-app.war`.
-   * **Stage 3 (Docker Build)**: Build Docker image từ Dockerfile cục bộ.
-   * **Stage 4 (Deploy)**: Dọn dẹp container cũ (nếu có) và chạy container mới bằng lệnh:
-     `docker run -d --name webapp-container -p 8087:8080 hello-world-app:latest`
-3. Sau khi Pipeline báo xanh (Success), hãy truy cập trình duyệt tại địa chỉ:
-   👉 **`http://<EC2_PUBLIC_IP>:8087`**
-
-Bạn sẽ thấy màn hình giao diện Web đen bóng vô cùng hiện đại, thông báo rằng ứng dụng Java của bạn đã được đóng gói và triển khai thành công!
+## 🛠️ Các Công nghệ Sử dụng trong Lab
+*   **CI/CD Orchestrator**: Jenkins (Declarative Pipeline)
+*   **Containerization**: Docker & Dockerfile
+*   **Build Tool**: Maven 3.8.8 & Java 11 (App compilation) / Java 21 (Jenkins Engine)
+*   **Version Control**: Git & GitHub
+*   **Infrastructure**: AWS EC2 Instance (Amazon Linux 2023 / Amazon Linux 2)
 
 ---
 
-## 💾 Đẩy code lên GitHub
-Để chạy thử pipeline, trước hết hãy đẩy toàn bộ cấu trúc code này lên GitHub của bạn:
+## 📖 Hướng Dẫn Các Bước Thực Hiện Chi Tiết
+
+### Bước 1: Đẩy mã nguồn dự án lên GitHub
+Trước khi cấu hình Jenkins, chúng ta cần đưa toàn bộ code của dự án lên GitHub cá nhân của bạn. Jenkins sẽ truy cập vào đây để tự động lấy code về và chạy pipeline:
 ```bash
 git add .
-git commit -m "feat: setup clean project 5 with Dockerfile, Jenkinsfile and simple webapp"
+git commit -m "feat: setup clean pipeline structure"
 git push origin main
 ```
+
+---
+
+### Bước 2: Tạo Máy chủ AWS EC2 và cấu hình Security Group
+1. Lên **AWS EC2 Console** -> click **Launch Instance**.
+2. **Đặt tên máy chủ**: `jenkins-docker-server`.
+3. **OS**: Chọn **Amazon Linux 2023 AMI** hoặc **Amazon Linux 2 AMI**.
+4. **Cấu hình Key Pair**: Tạo mới hoặc chọn Key Pair sẵn có dưới dạng `.pem` (ví dụ: `jenkins-docker-key.pem`).
+5. **Cấu hình mạng (Network Settings - Click Edit)**:
+   * **Security Group Name**: Đổi tên thành `jenkins-docker-sg`.
+   * **Inbound Rules**: Cấu hình mở 3 cổng mạng sau:
+     * **Cổng 22 (SSH)**: Source type chọn `Anywhere` hoặc `My IP` (để kết nối Terminal từ máy cá nhân).
+     * **Cổng 8080 (Jenkins)**: Custom TCP -> Port `8080` từ `Anywhere` (truy cập Web UI của Jenkins).
+     * **Cổng 8087 (Web Application)**: Custom TCP -> Port `8087` từ `Anywhere` (để truy cập trang web ứng dụng sau khi deploy).
+6. Click **Launch Instance**.
+
+---
+
+### Bước 3: Kết nối SSH vào máy chủ EC2
+Mở terminal **Git Bash** ở máy tính cá nhân của bạn, chuyển quyền truy cập file khóa và tiến hành kết nối:
+```bash
+# Phân quyền đọc cho file khóa (Ví dụ lưu tại ổ D)
+chmod 400 /d/Dowload/jenkins-docker-key.pem
+
+# SSH kết nối vào EC2 (dùng IP Public hoặc DNS của máy chủ)
+ssh -i /d/Dowload/jenkins-docker-key.pem ec2-user@<YOUR_EC2_PUBLIC_DNS>
+```
+
+---
+
+### Bước 4: Tối ưu bộ nhớ ảo (Swap Space) cho EC2 (RẤT QUAN TRỌNG)
+Vì máy chủ `t2.micro` mặc định chỉ có 1GB RAM, quá trình Maven compile và Docker build sẽ rất dễ gây nghẽn đĩa và treo máy. Ta tạo thêm 2GB Swap phụ trợ:
+```bash
+# 1. Tạo file swap dung lượng 2GB
+sudo dd if=/dev/zero of=/swapfile bs=1M count=2048
+
+# 2. Phân quyền chỉ cho root truy cập
+sudo chmod 600 /swapfile
+
+# 3. Định dạng vùng Swap
+sudo mkswap /swapfile
+
+# 4. Kích hoạt
+sudo swapon /swapfile
+
+# 5. Thiết lập tự động khởi động Swap khi máy chủ reset (Lệnh gộp có dấu pipe '|')
+echo '/swapfile swap swap defaults 0 0' | sudo tee -a /etc/fstab
+
+# 6. Kiểm tra lại RAM và Swap đã hoạt động
+free -h
+```
+
+---
+
+### Bước 5: Cài đặt Java, Jenkins, Docker và Git
+Sau khi cấu hình bộ nhớ ảo xong, copy và chạy lần lượt các lệnh sau trên terminal SSH để cài đặt môi trường chạy:
+```bash
+# 1. Cập nhật hệ thống
+sudo yum update -y
+
+# 2. Cài đặt Git (Cần thiết để Jenkins pull code)
+sudo yum install git -y
+
+# 3. Cài đặt Java 21 (Bắt buộc cho công cụ lõi của Jenkins phiên bản mới)
+sudo yum install java-21-amazon-corretto -y
+
+# 4. Thêm kho lưu trữ Repository của Jenkins
+sudo wget -O /etc/yum.repos.d/jenkins.repo https://pkg.jenkins.io/redhat-stable/jenkins.repo
+sudo rpm --import https://pkg.jenkins.io/redhat-stable/jenkins.io-2023.key
+
+# 5. Cài đặt Jenkins
+sudo yum install jenkins -y
+
+# 6. Start và Kích hoạt Jenkins khởi chạy cùng hệ thống
+sudo systemctl enable jenkins
+sudo systemctl start jenkins
+
+# 7. Cài đặt Docker
+sudo yum install docker -y
+
+# 8. Start và Kích hoạt Docker khởi chạy cùng hệ thống
+sudo systemctl enable docker
+sudo systemctl start docker
+
+# 9. Thêm user 'jenkins' vào group 'docker'
+# Giúp Jenkins có quyền trực tiếp thực hiện lệnh docker build/run mà không cần sudo
+sudo usermod -aG docker jenkins
+
+# 10. Restart lại Jenkins để cập nhật quyền group mới
+sudo systemctl restart jenkins
+
+# 11. Đọc mật khẩu Admin để mở khóa giao diện Jenkins trên Web
+sudo cat /var/lib/jenkins/secrets/initialAdminPassword
+```
+*(Hãy lưu lại chuỗi mật khẩu Admin dài hiển thị sau lệnh số 11 để điền vào trang web).*
+
+---
+
+### Bước 6: Cài đặt và liên kết Maven toàn cục
+Chạy các lệnh sau trên terminal SSH để tải Maven 3.8.8 và tạo liên kết (symlink) toàn cục để Jenkins gọi trực tiếp:
+```bash
+cd /opt
+sudo wget https://archive.apache.org/dist/maven/maven-3/3.8.8/binaries/apache-maven-3.8.8-bin.tar.gz
+sudo tar -xvzf apache-maven-3.8.8-bin.tar.gz
+
+# Tạo liên kết symlink để lệnh 'mvn' dùng được ở mọi nơi trên máy chủ
+sudo ln -s /opt/apache-maven-3.8.8/bin/mvn /usr/bin/mvn
+
+# Kiểm tra hoạt động của Maven
+mvn -version
+```
+
+---
+
+### Bước 7: Thiết lập Giao diện Web Jenkins
+1. Truy cập địa chỉ: `http://<YOUR_EC2_PUBLIC_IP>:8080`.
+2. Dán mật khẩu thu được ở **Bước 5** vào để Unlock Jenkins.
+3. Click chọn **Install suggested plugins** và chờ các plugin mặc định tải xong.
+4. Khởi tạo tài khoản **Admin** đầu tiên (Tên, Mật khẩu, Email) và tiến hành lưu lại.
+5. Cấu hình đường dẫn Maven trong Jenkins:
+   * Vào **Manage Jenkins** ➔ **Tools** (hoặc *Global Tool Configuration*).
+   * Cuộn xuống phần **Maven installations...** và click **Add Maven**:
+     * **Name**: Điền đúng tên `Maven 3`.
+     * **Bỏ tích** ở ô *Install automatically*.
+     * **MAVEN_HOME**: Điền đường dẫn: `/opt/apache-maven-3.8.8`.
+   * Click **Save**.
+
+---
+
+### Bước 8: Điều chỉnh cấu hình luồng chạy (Executors) của Node chính
+Theo cơ chế mặc định của Jenkins phiên bản mới, số luồng chạy của **Built-in Node** được đặt bằng 0. Chúng ta cần tăng lên để chạy job trực tiếp trên máy chủ:
+1. Vào **Manage Jenkins** ➔ **Nodes**.
+2. Click chọn **Built-in Node** ➔ click chọn **Configure** ở menu bên trái.
+3. Thay đổi giá trị của ô **`Number of executors`** từ `0` thành **`2`**.
+4. Tại mục **`Free Temp Space`**:
+   * Tích chọn ô vuông **`Don't mark agents temporarily offline`**.
+   * Đổi **`Free Space Threshold`** thành `50MiB` và **`Free Space Warning Threshold`** thành `100MiB` (để tránh Jenkins tự động tắt node khi bộ nhớ tạm của `t2.micro` ở mức thấp).
+5. Click **Save**.
+6. Ở menu bên trái, click chọn nút **`Bring this node online`** (nếu biểu tượng đĩa đơ có dấu X đỏ vẫn hiện).
+
+---
+
+### Bước 9: Tạo và khởi động Pipeline Job
+1. Từ trang chủ Jenkins, chọn **New Item**.
+2. Đặt tên Job: `hello-world-pipeline`, chọn kiểu **Pipeline** và click **OK**.
+3. Cuộn xuống phần **Pipeline** cấu hình:
+   * **Definition**: Chọn **Pipeline script from SCM**.
+   * **SCM**: Chọn **Git**.
+   * **Repository URL**: Điền đường dẫn dự án GitHub của bạn (ví dụ: `https://github.com/QTune1603/Docker-Container-using-Jenkins.git`).
+   * **Branch Specifier**: Đổi từ `*/master` thành **`*/main`** (hoặc tên nhánh của bạn).
+   * **Script Path**: Giữ nguyên `Jenkinsfile`.
+4. Click **Save**.
+5. Chọn **Build Now** để chạy và theo dõi quá trình biên dịch, đóng gói Docker và deploy hoàn toàn tự động!
+
+---
+
+### Bước 10: Nghiệm thu và Kiểm thử luồng tự động (CI/CD Verification)
+1. **Truy cập ứng dụng**: Truy cập trình duyệt theo địa chỉ: `http://<YOUR_EC2_PUBLIC_IP>:8087` để thưởng thức trang ứng dụng web JSP được thiết kế tuyệt đẹp chạy trên nền Docker.
+2. **Kiểm tra luồng tự động**:
+   * Vào code dự án của bạn trên máy cá nhân, chỉnh sửa file `index.jsp` (ví dụ sửa tiêu đề).
+   * Commit và Push lên GitHub.
+   * Lên Jenkins click **Build Now**.
+   * Sau khi Job build xong, tải lại trang web cổng `8087` và quan sát thay đổi xuất hiện lập tức mà không cần SSH chỉnh sửa gì thêm!
+
+---
+
+## 🐋 Phân tích Tệp tin Cấu hình chính
+
+### 1. Dockerfile
+Tệp tin hướng dẫn Docker cách đóng gói ứng dụng:
+*   `FROM tomcat:9.0-jdk11-corretto`: Sử dụng base image là Tomcat 9 chính thức chạy Java 11.
+*   `RUN rm -rf /usr/local/tomcat/webapps/*`: Xóa các thư mục ứng dụng mặc định để tránh tranh chấp đường dẫn.
+*   `COPY target/hello-world-app.war /usr/local/tomcat/webapps/ROOT.war`: Đóng gói file `.war` của bạn thành ứng dụng gốc `/` (ROOT.war) để khi truy cập không cần thêm đuôi đường dẫn thư mục sau IP.
+
+### 2. Jenkinsfile
+File thiết lập Pipeline Declarative tự động hóa các bước:
+*   **Stage 1: Clone**: Pull code mới nhất từ GitHub.
+*   **Stage 2: Build**: Chạy Maven đóng gói file `.war` (`mvn clean package -DskipTests`).
+*   **Stage 3: Docker Build**: Build Docker Image với thẻ tag tương ứng.
+*   **Stage 4: Deploy**: Tự động kiểm tra và dọn dẹp các container cũ trùng tên đang chạy, sau đó khởi chạy container mới ở cổng `8087`.

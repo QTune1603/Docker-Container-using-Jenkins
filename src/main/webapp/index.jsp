@@ -228,7 +228,7 @@
                         <span class="status-dot"></span>
                         <span>Application Active</span>
                     </div>
-                    <div>Lab Project 05</div>
+                    <div>Lab Project</div>
                 </div>
             </div>
         </div>
